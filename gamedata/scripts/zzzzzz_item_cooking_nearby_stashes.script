@@ -1,0 +1,113 @@
+--[[
+	Monkey patch: item_cooking.script
+	Extends cooking menu to use nearby stashes for ingredients and fuel
+
+	Features:
+	- Searches nearby stashes for cooking ingredients
+	- Searches nearby stashes for fuel items
+	- Uses separate cooking_range MCM setting (default 50m vs 10m for crafting)
+--]]
+
+local default_range = 50
+
+function on_game_start()
+	-- Monkey patch item_cooking.UICook:Load_ActorItems to include nearby stashes
+	local original_Load_ActorItems = item_cooking.UICook.Load_ActorItems
+
+	function item_cooking.UICook:Load_ActorItems()
+		-- Get stash range from MCM
+		local stash_range = ui_mcm and ui_mcm.get("craft_from_stashes/cooking_range") or default_range
+
+		-- Collect needed sections
+		local needed = {}
+		for i = 1, #self.meals do
+			for j = 1, 2 do  -- _size = 2 (number of ingredients)
+				local sec = self.meals[i][j] and self.meals[i][j].sec
+				if sec and (not needed[sec]) then
+					needed[sec] = true
+				end
+			end
+		end
+
+		-- Scan player inventory and collect ids
+		db.actor:iterate_inventory(function(temp, obj)
+			local sec = obj:section()
+			if needed[sec] or self.fuel[sec] then
+				local id = obj:id()
+				if (not self.objs[sec]) then
+					self.objs[sec] = {}
+				end
+				self.objs[sec][id] = IsItem("multiuse", sec) and obj:get_remaining_uses() or 1
+			end
+		end)
+
+		-- Also scan nearby stashes for ingredients and fuel
+		if _G.GetStashesInRange and _G.IterateStashesInRange then
+			IterateStashesInRange(function(temp, obj)
+				local sec = obj:section()
+				if needed[sec] or self.fuel[sec] then
+					local id = obj:id()
+					if (not self.objs[sec]) then
+						self.objs[sec] = {}
+					end
+					self.objs[sec][id] = IsItem("multiuse", sec) and obj:get_remaining_uses() or 1
+				end
+			end, stash_range)
+		end
+	end
+
+	-- Monkey patch item_cooking.UICook:CollectValidItems to count cooking items from nearby stashes
+	-- This fixes the count display in the title to include nearby stash items
+	local original_CollectValidItems = item_cooking.UICook.CollectValidItems
+	function item_cooking.UICook:CollectValidItems(obj, section)
+		-- Get stash range from MCM
+		local stash_range = ui_mcm and ui_mcm.get("craft_from_stashes/cooking_range") or default_range
+
+		-- Collect valid items
+		empty_table(self.multiUseItemsObj)
+		local parts_id = {}
+		local function search(temp, item)
+			if (item:section() == section) and (not parts_id[item:id()]) then
+				local cnt = IsItem("multiuse", section, nil) and item:get_remaining_uses() or 1
+				local id = item:id()
+				parts_id[id] = cnt
+				self.multiUseItemsObj[#self.multiUseItemsObj + 1] = {
+					[id] = cnt
+				}
+			end
+		end
+
+		-- Search player inventory
+		db.actor:iterate_inventory(search, nil)
+
+		-- Search nearby stashes
+		if _G.GetStashesInRange and _G.IterateStashesInRange then
+			IterateStashesInRange(search, stash_range)
+		end
+
+		-- Collect Uses (total count from all sources)
+		self.multiUseItemsUses = 0
+		for _, cnt in pairs(parts_id) do
+			self.multiUseItemsUses = self.multiUseItemsUses + cnt
+		end
+
+		-- Write amount of uses near cooking item name
+		local str = ui_item.get_sec_name(section)
+		if (self.cooking_limited) then
+			local color = ""
+			if self.multiUseItemsUses > 3 then
+				color = utils_xml.get_color("d_green")
+			elseif self.multiUseItemsUses > 2 then
+				color = utils_xml.get_color("pda_yellow")
+			elseif self.multiUseItemsUses > 1 then
+				color = utils_xml.get_color("d_orange")
+			else
+				color = utils_xml.get_color("d_red")
+			end
+			str = color .. str .. " (" .. self.multiUseItemsUses .. ")"
+		end
+		self.cap_menu:SetText(str)
+
+		return true
+	end
+end

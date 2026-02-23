@@ -1,0 +1,119 @@
+--[[
+	Monkey patch: craft_use_low_cond.script
+	Extends low-condition priority crafting to search nearby stashes
+
+	Features:
+	- Searches both inventory and nearby stashes for degradable items
+	- Artifact high-priority option: regular artifacts use highest condition first
+	- Perk artifacts (af_signet, af_pas) always use lowest condition first
+	- Deletes items from stashes, ensures result items are created
+--]]
+
+function on_game_start()
+	-- Save reference to the previous Craft wrapper (craft_use_low_cond's version)
+	local craft_use_low_cond_Craft = ui_workshop.UIWorkshopCraft.Craft
+
+	-- Override with our version that searches nearby stashes
+	function ui_workshop.UIWorkshopCraft:Craft()
+		-- Get stash range from MCM
+		local stash_range = ui_mcm and ui_mcm.get("craft_from_stashes/range") or 10
+
+		-- Track which items we've already processed to avoid re-processing
+		self._already_processed = self._already_processed or {}
+
+		for idx,_ in pairs(self.craft_item) do
+			-- Skip if already processed by us
+			if self._already_processed[idx] then
+				goto continue
+			end
+			local sec
+
+			-- Save item section if it's degradable
+			local item = level.object_by_id(self.craft_item[idx][1])
+			if item and utils_item.is_degradable(item) then
+				sec = item:section()
+			end
+
+			if sec then
+				-- Save # of item needed. Empty craft table
+				local craft_cnt = #self.craft_item[idx]
+				self.craft_item[idx] = {}
+				local cond_sort_list = {}
+				local item_parents = {}  -- Track which stash each item is in
+
+				-- Reusable search function for collecting items
+				local function search_items(temp, item)
+					if item:section() == sec then
+						cond_sort_list[item:id()] = item:condition()
+						item_parents[item:id()] = temp  -- temp is the parent (nil for inventory, stash obj for stashes)
+					end
+				end
+
+				-- Collect items from player inventory (parent = nil)
+				db.actor:iterate_inventory(search_items, nil)
+
+				-- Collect from workshop stash if it exists
+				local stashId = self.stashId or (self.owner and self.owner.stashId)
+				if stashId then
+					local stash_obj = get_object_by_id(stashId)
+					if stash_obj then
+						stash_obj:iterate_inventory_box(search_items, stash_obj)
+					end
+				end
+
+				-- Collect from nearby stashes (parent = stash obj)
+				-- Note: clsid check is already done inside IterateStashesInRange
+				IterateStashesInRange(search_items, stash_range)
+
+				-- Sort by condition ascending (lowest condition first)
+				-- For artifacts, optionally use descending sort (highest condition first) based on MCM setting
+				-- Exception: perk artifacts (like af_signet) always use low-condition-first
+				local counter = 1
+				local mcm_setting = ui_mcm and ui_mcm.get("craft_from_stashes/artifact_high_priority")
+				local use_high_priority = (mcm_setting ~= false)
+				-- Note: In Lua, 0 is truthy, so we must compare explicitly to 1
+				local is_artifact = (IsItem("artefact", sec) == 1)
+				local is_perk_artifact = is_artifact and (IsItem("perk", sec) == 1)
+				local sort_func = (is_artifact and not is_perk_artifact and use_high_priority) and value_sort_descending or value_sort_ascending
+
+				for id, cond in spairs(cond_sort_list, sort_func) do
+					if counter > craft_cnt then break end
+
+					local parent = item_parents[id]
+					if parent then
+						-- Item is in stash - delete it now, but still add to craft_item
+						-- so base_craft knows to create the result item
+						alife_release_id(id)
+					end
+
+					-- Always add to craft_item so base_craft creates the result
+					-- For inventory items, base_craft will delete them
+					-- For stash items, they're already deleted above
+					self.craft_item[idx][#self.craft_item[idx] + 1] = id
+
+					counter = counter + 1
+				end
+
+				-- Mark this item as processed so craft_use_low_cond doesn't reprocess it
+				self._already_processed[idx] = true
+			end
+
+			::continue::
+		end
+
+		-- Call craft_use_low_cond's wrapped version
+		-- Items we processed are marked in _already_processed, so they won't be reprocessed
+		craft_use_low_cond_Craft(self)
+
+		-- Clear processed flags for next craft operation
+		self._already_processed = {}
+	end
+end
+
+function value_sort_ascending(t, a, b)
+	return t[a] < t[b]
+end
+
+function value_sort_descending(t, a, b)
+	return t[a] > t[b]
+end
