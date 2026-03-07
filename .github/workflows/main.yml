@@ -37,6 +37,11 @@ jobs:
           echo "? files to build:"
           ls -la build_temp/
 
+      - name: Comment out debug messages
+        run: |
+          find build_temp -name "*.script" -exec sed -i \
+            's/^\(\s*\)\(printf\|print_ws\)(/\1--\2(/g' {} +
+
       - name: Create 7z archive
         uses: edgarrc/action-7z@v1
         with:
