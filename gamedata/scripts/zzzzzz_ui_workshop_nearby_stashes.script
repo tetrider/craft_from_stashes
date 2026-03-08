@@ -58,6 +58,24 @@ function _G.GetStashesInRange(range)
 		end
 	end
 
+	-- Also check Utjan's Anomalous Stash (single hidden_stash box shared by all markers)
+	if anomalous_stash and anomalous_stash.anom_stashes and anomalous_stash.hidden_stash then
+		for id, _ in pairs(anomalous_stash.anom_stashes) do
+			local se_obj = level.object_by_id(id)
+			if se_obj and distance_between_safe(db.actor, se_obj) <= range then
+				local hidden_id = anomalous_stash.hidden_stash
+				if not stash_set[hidden_id] then
+					local hidden_obj = level.object_by_id(hidden_id)
+					if hidden_obj then
+						table.insert(stashes, hidden_id)
+						stash_set[hidden_id] = true
+					end
+				end
+				break  -- hidden_stash is shared, no need to check more markers
+			end
+		end
+	end
+
 	-- Also check furniture workshop stashes
 	if m_data.workshop_stashes then
 		for id, stash_id in pairs(m_data.workshop_stashes) do
