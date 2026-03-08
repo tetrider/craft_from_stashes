@@ -133,7 +133,7 @@ function on_game_start()
 		local self_ref = self
 		CreateTimeEvent("melter_reinit", "melter_reinit", 0.1, function()
 			if not (self_ref and self_ref:IsShown()) then return true end
-			-- Rescan stashes and reinit CC[1] (left panel - artifacts to empower)
+			-- Rescan stashes and reinit CC[1] (right panel - artifacts to empower)
 			self_ref:InitInventory(1)
 			-- Find and select the empowered artifact by id, fallback to first
 			local target_idx = nil
@@ -149,7 +149,7 @@ function on_game_start()
 			end
 			if target_idx then
 				self_ref.CC[1]:On_Select(target_idx)
-				-- Rescan stashes and reinit CC[2] (right panel - materials)
+				-- Rescan stashes and reinit CC[2] (left panel - materials)
 				self_ref:InitInventory(2)
 			end
 			return true
