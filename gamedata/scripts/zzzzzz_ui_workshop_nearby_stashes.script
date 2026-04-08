@@ -541,6 +541,7 @@ function on_game_start()
 		-- Text (Amount)
 		local amt = amount
 		local box = 1
+		local belt_ids = {}
 		if IsItem("ammo",sec) then
 			box = IsItem("ammo",sec)
 			amt = box * amount
@@ -549,6 +550,11 @@ function on_game_start()
 		-- Text (Name)
 		local parts_id = {}
 		local name = ui_item.get_sec_name(sec)
+		
+		db.actor:iterate_belt( function(owner, arty)
+			printf(arty:id())
+			belt_ids[arty:id()] = true
+		end)
 
 		if (not result) then
 			-- Reset
@@ -566,7 +572,7 @@ function on_game_start()
 
 			-- Collect valid items from player inventory
 			local function search(temp, item)
-				if (item:section() == sec) and (not parts_id[item:id()]) then
+				if (item:section() == sec) and (not parts_id[item:id()]) and (not belt_ids[item:id()]) then
 					local cnt = IsItem("multiuse",nil,item) and item:get_remaining_uses() or 1
 					parts_id[item:id()] = cnt
 				end
@@ -584,6 +590,14 @@ function on_game_start()
 
 			-- Then also collect from other nearby stashes
 			IterateStashesInRange(search, stash_range, stashId)
+			
+			
+			-- Removal of belt artefacts to be sure
+			for id,cnt in pairs(parts_id) do
+				if belt_ids[id] then
+					parts_id[id] = nil
+				end
+			end
 
 			-- Check and Allow/Prevent
 			local dischargeAmount = amount
