@@ -71,10 +71,16 @@ function on_game_start()
 				local counter = 1
 				local mcm_setting = ui_mcm and ui_mcm.get("craft_from_stashes/artefact_high_priority")
 				local use_high_priority = (mcm_setting ~= false)
-				-- Note: In Lua, 0 is truthy, so we must compare explicitly to 1
-				local is_artefact = (IsItem("artefact", sec) == 1)
-				local is_perk_artefact = is_artefact and (IsItem("perk", sec) == 1)
-				local sort_func = (is_artefact and not is_perk_artefact and use_high_priority) and value_sort_descending or value_sort_ascending
+				local sort_func = value_sort_ascending
+				local kind = SYS_GetParam(0, sec, "kind")
+				local r_kind = SYS_GetParam(0, self.craft_item_r[1], "kind")
+				if r_kind == "i_arty" then
+					if kind == "i_arty" and use_high_priority then
+						sort_func = value_sort_descending
+					elseif kind == "i_arty_junk" and use_high_priority then
+						sort_func = value_sort_ascending
+					end
+				end
 
 				for id, cond in spairs(cond_sort_list, sort_func) do
 					if counter > craft_cnt then break end
@@ -83,7 +89,6 @@ function on_game_start()
 					if parent then
 						-- Item is in stash: save artefact condition data before releasing
 						-- (zz_ui_workshop_keep_crafting_window_open reads self._stash_arty_* to set result condition)
-						local kind = SYS_GetParam(0, sec, "kind")
 						if kind == "i_arty" then
 							self._stash_arty_total_cond = self._stash_arty_total_cond + cond
 							self._stash_arty_counter = self._stash_arty_counter + 1
