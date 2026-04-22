@@ -1,0 +1,201 @@
+--[[
+    craft_from_stashes × Ammo_Crate compatibility patch
+
+    Extends craft_from_stashes to include ammo stored in nearby Ammo Crates (Ammo_Crate_v1.2.0).
+
+    Problem: ammo inside a closed crate lives only in the AMMO_CRATES Lua table — no real game
+    objects — so IterateStashesInRange() cannot see it. The workshop UI and crate UI also cannot
+    be open simultaneously, so the crate's temporary fake-stash is never active during crafting.
+
+    Solution:
+      1. After UIWorkshopCraft:UpdateItem runs for an ammo slot, count crate ammo in range and
+         add it to the display. Set craft_allow[n] = true if the combined total is sufficient.
+      2. Store how much crate ammo each slot will need in a module-level table.
+      3. Wrap UIWorkshopCraft:Craft to consume that ammo directly from AMMO_CRATES after
+         base_craft releases the real items.
+]]
+
+-- Per-slot crate ammo that must be consumed when Craft() is called.
+-- Keyed by slot index n. Cleared at the start of each UpdateItem call and in Craft.
+-- Structure: [n] = { sec = "ammo_section", count = N, breakdown = { [crate_id] = N, ... } }
+local cfs_ac_needed = {}
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+local function get_range()
+    return ui_mcm and ui_mcm.get("craft_from_stashes/range") or 10
+end
+
+--- Count ammo of `sec` stored in closed ammo crates within `range` metres.
+--- Returns total_count (number) and breakdown table { [crate_id] = count }.
+local function count_crate_ammo(sec, range)
+    if not (ammo_crate_core and ammo_crate_core.AMMO_CRATES) then
+        return 0, {}
+    end
+
+    local total     = 0
+    local breakdown = {}
+
+    for crate_id, entries in pairs(ammo_crate_core.AMMO_CRATES) do
+        if not entries or #entries == 0 then goto continue end
+
+        local crate_obj = level.object_by_id(crate_id)
+        if not (crate_obj and distance_between_safe(db.actor, crate_obj) <= range) then
+            goto continue
+        end
+
+        for _, entry in pairs(entries) do
+            if entry.sec == sec and entry.count and entry.count > 0 then
+                breakdown[crate_id] = (breakdown[crate_id] or 0) + entry.count
+                total               = total + entry.count
+            end
+        end
+
+        ::continue::
+    end
+
+    return total, breakdown
+end
+
+--- Count real ammo of `sec` in player inventory + workshop stash + nearby stashes.
+--- Mirrors the iteration that UpdateItem already did, so we know the real subtotal.
+local function count_real_ammo(sec, range, stashId)
+    local total = 0
+    local function itr(_, obj)
+        if obj:section() == sec then
+            total = total + (obj.ammo_get_count and obj:ammo_get_count() or 1)
+        end
+    end
+    db.actor:iterate_inventory(itr)
+    if stashId then
+        local stash = level.object_by_id(stashId)
+        if stash then stash:iterate_inventory_box(itr, stash) end
+    end
+    IterateStashesInRange(itr, range, stashId)
+    return total
+end
+
+--- Consume `needed` rounds of `sec` from crates listed in `breakdown`.
+--- Modifies AMMO_CRATES directly and updates each crate's displayed weight.
+local function consume_from_crates(sec, needed, breakdown)
+    if needed <= 0 or not ammo_crate_core then return end
+
+    local remaining = needed
+
+    for crate_id, _ in pairs(breakdown) do
+        if remaining <= 0 then break end
+
+        local entries = ammo_crate_core.AMMO_CRATES[crate_id]
+        if not entries then goto continue end
+
+        -- Iterate in reverse so table.remove is safe
+        for i = #entries, 1, -1 do
+            if remaining <= 0 then break end
+            local entry = entries[i]
+            if entry and entry.sec == sec and entry.count and entry.count > 0 then
+                local take      = math.min(remaining, entry.count)
+                -- Adjust weight proportionally (weight is total for the stack)
+                local per_round = (entry.count > 0) and (entry.weight / entry.count) or 0
+                entry.count     = entry.count - take
+                entry.weight    = per_round * entry.count
+                remaining       = remaining - take
+                if entry.count <= 0 then
+                    table.remove(entries, i)
+                end
+            end
+        end
+
+        -- Update the crate object's carry weight
+        local crate_obj = level.object_by_id(crate_id)
+        if crate_obj and ammo_crate_core.calculate_crate_full_weight then
+            crate_obj:set_weight(ammo_crate_core.calculate_crate_full_weight(crate_id))
+        end
+
+        ::continue::
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Monkey patches (applied inside on_game_start so both mods are fully loaded)
+-- ---------------------------------------------------------------------------
+
+function on_game_start()
+    -- Bail out silently if either mod is missing
+    if not ammo_crate_core then return end
+    if not GetStashesInRange then return end
+
+    local prev_UpdateItem = ui_workshop.UIWorkshopCraft.UpdateItem
+
+    --- Extended UpdateItem: adds crate ammo to the ammo-ingredient display and allows
+    --- crafting when the combined (real + crate) total is sufficient.
+    function ui_workshop.UIWorkshopCraft:UpdateItem(n, sec, amount, result, toolkit_idx, toolkit_sec)
+        -- Run the existing implementation (inventory + stash search)
+        prev_UpdateItem(self, n, sec, amount, result, toolkit_idx, toolkit_sec)
+
+        -- Only handle ammo ingredient slots
+        if result or not IsItem("ammo", sec) then return end
+
+        -- Always reset the stored crate debt for this slot
+        cfs_ac_needed[n] = nil
+
+        -- If real items are already sufficient, nothing to do
+        if self.craft_allow[n] then return end
+
+        local range   = get_range()
+        local stashId = self.stashId or (self.owner and self.owner.stashId)
+
+        -- box = ammo per box (IsItem("ammo", sec) returns this multiplier)
+        local box = IsItem("ammo", sec) or 1
+        local amt = box * amount  -- total rounds required
+
+        -- Re-count real ammo so we know the exact shortfall
+        local real_total               = count_real_ammo(sec, range, stashId)
+        local crate_total, breakdown   = count_crate_ammo(sec, range)
+        local combined                 = real_total + crate_total
+
+        -- Update displayed count regardless (shows truthful combined total)
+        self.itm_num[n]:SetText(tostring(combined) .. "/" .. tostring(amt))
+
+        if combined < amt then
+            -- Still not enough; leave craft_allow[n] = false
+            return
+        end
+
+        -- Combined is sufficient: unlock crafting
+        self.craft_allow[n] = true
+        self.itm_num[n]:SetTextColor(GetARGB(200, 50, 255, 50))
+        utils_xml.set_icon(sec, false, self.itm_ico_temp[n], self.itm_ico[n])
+
+        -- Record the crate debt (rounds that real items cannot cover)
+        local crate_needed = math.max(0, amt - real_total)
+        if crate_needed > 0 then
+            cfs_ac_needed[n] = { sec = sec, count = crate_needed, breakdown = breakdown }
+        end
+    end
+
+    local prev_Craft = ui_workshop.UIWorkshopCraft.Craft
+
+    --- Extended Craft: after base_craft consumes real items, consume any remaining
+    --- ammo debt directly from AMMO_CRATES.
+    function ui_workshop.UIWorkshopCraft:Craft()
+        -- Snapshot and clear the debt table before calling Craft, which may reset
+        -- self state and call UpdateItem again during its execution.
+        local pending    = {}
+        for n, data in pairs(cfs_ac_needed) do
+            pending[n] = data
+        end
+        cfs_ac_needed = {}
+
+        -- Run the full craft chain (craft_from_stashes → craft_use_low_cond → base_craft)
+        prev_Craft(self)
+
+        -- Now consume the owed crate ammo
+        for _, data in pairs(pending) do
+            if data.count > 0 then
+                consume_from_crates(data.sec, data.count, data.breakdown)
+            end
+        end
+    end
+end
