@@ -11,20 +11,44 @@
 local default_range = 10
 
 function on_game_start()
-	-- Monkey patch item_repair.UIRepair:InitInventory to include nearby stashes
+	-- Monkey patch item_repair.UIRepair:InitInventory to include nearby stashes.
+	--
+	-- DESIGN: wrap the previous version instead of reimplementing from scratch.
+	-- This preserves changes made by other mods (e.g. RPG-XP Zone Gunsmith / Jury Rigging
+	-- perk that injects Metallic Scraps as a bonus repair item).  After the previous
+	-- version populates CC[1]/CC[2] from inventory, we read back what it put there,
+	-- append stash items, and Reinit with the combined list.
 	local original_InitInventory = item_repair.UIRepair.InitInventory
 
 	function item_repair.UIRepair:InitInventory(n)
-		-- Get stash range from MCM
+		-- Let the previous implementation run first (handles inventory + any other mod additions)
+		original_InitInventory(self, n)
+
+		if not GetStashesInRange then return end
 		local stash_range = ui_mcm and ui_mcm.get("craft_from_stashes/range") or default_range
 
-		-- n == 1: List items to repair (weapons/armor)
+		-- n == 1: items to repair (left panel) ------------------------------------
 		if n == 1 then
+			-- Read back what the previous version put into CC[1]
 			local inv = {}
 			local size_t = 0
+			local existing_ids = {}
 
-			-- Compatible weapons list to repair from inventory
-			db.actor:iterate_inventory(function(owner, obj)
+			for idx, ci in pairs(self.CC[1].cell) do
+				if ci:IsShown() then
+					local obj = self.CC[1]:GetObj(idx)
+					if obj then
+						existing_ids[obj:id()] = true
+						size_t = size_t + 1
+						inv[size_t] = obj
+					end
+				end
+			end
+
+			-- Append repairable items from nearby stashes
+			local added = false
+			IterateStashesInRange(function(temp, obj)
+				if existing_ids[obj:id()] then return end
 				local sec = obj:section()
 				local main_section = ini_sys:r_string_ex(sec, "repair_type") or sec
 				if (self.repair_only and self.repair_only[main_section]) then
@@ -32,91 +56,103 @@ function on_game_start()
 					if (con and con >= (self.min_condition * 100) and con <= self.max_condition * 100) then
 						size_t = size_t + 1
 						inv[size_t] = obj
+						existing_ids[obj:id()] = true
+						added = true
 					end
 				end
-			end)
+			end, stash_range)
 
-			-- Also collect from nearby stashes
-			if GetStashesInRange then
-				IterateStashesInRange(function(temp, obj)
-					local sec = obj:section()
-					local main_section = ini_sys:r_string_ex(sec, "repair_type") or sec
-					if (self.repair_only and self.repair_only[main_section]) then
-						local con = math.ceil(obj:condition() * 100)
-						if (con and con >= (self.min_condition * 100) and con <= self.max_condition * 100) then
-							size_t = size_t + 1
-							inv[size_t] = obj
-						end
-					end
-				end, stash_range)
+			if added then
+				self.CC[1]:Reinit(inv)
 			end
 
-			self.CC[1]:Reinit(inv)
-
-		-- n == 2: List parts/materials to use for repair
+		-- n == 2: repair materials (right panel) -----------------------------------
 		elseif n == 2 then
 			local obj_s = self.CC[1]:GetCell_Selected(true)
-			if not obj_s then
-				return
-			end
+			if not obj_s then return end
 
+			-- Read back what the previous version put into CC[2], preserving bonus values.
+			-- ci.flags.info holds the bonus percentage set by Reinit(inv, inf).
 			local inv = {}
 			local inf = {}
 			local size_t = 0
-			local ItemListSec_2 = {} -- to show only one, lowest condition, copy of bonus items
+			local existing_ids = {}
+			local ItemListSec_2 = {}
 
-			-- Helper function to process repair materials
-			local function process_repair_item(owner, obj)
-				local sec = obj:section()
-				if (obj) and (obj:id() ~= obj_s:id()) and (obj:id() ~= self.obj:id()) then
-					local part_bonus
-					if (self.parts_match and sec == obj_s:section()) then
-						part_bonus = obj:condition()
-						part_bonus = (game_achievements.has_achievement("mechanized_warfare")) and (part_bonus + 0.02) or part_bonus
-						part_bonus = clamp(math.floor(part_bonus * 100) * self.parts_multi, 0, 100)
-					elseif (self.parts_sections and self.parts_sections[sec]) then
-						part_bonus = ini_sys:r_float_ex(sec, "repair_part_bonus") or self.part_bonus
-						part_bonus = (game_achievements.has_achievement("mechanized_warfare")) and (part_bonus + 0.02) or part_bonus
-						part_bonus = clamp(math.floor(part_bonus * 100) * self.parts_multi, 0, 100)
-					end
-
-					if part_bonus then
-						-- Keep only the lowest condition item of each type
-						if ItemListSec_2[sec] and ItemListSec_2[sec].condition > obj:condition() then
-							local index = ItemListSec_2[sec].index
-							inv[index] = obj
-							inf[index] = part_bonus
-							ItemListSec_2[sec].condition = obj:condition()
-						elseif not ItemListSec_2[sec] then
-							size_t = size_t + 1
-							inv[size_t] = obj
-							inf[size_t] = part_bonus
-							ItemListSec_2[sec] = {
-								index = size_t,
-								condition = obj:condition()
-							}
+			for idx, ci in pairs(self.CC[2].cell) do
+				if ci:IsShown() then
+					local obj = self.CC[2]:GetObj(idx)
+					if obj then
+						local sec = obj:section()
+						local bonus = (ci.flags and ci.flags.info) or 0
+						existing_ids[obj:id()] = true
+						size_t = size_t + 1
+						inv[size_t] = obj
+						inf[size_t] = bonus
+						if not ItemListSec_2[sec] then
+							ItemListSec_2[sec] = { index = size_t, condition = obj:condition() }
 						end
 					end
 				end
 			end
 
-			-- Search player inventory
-			db.actor:iterate_inventory(process_repair_item)
+			-- Append repair materials from nearby stashes
+			local added = false
+			IterateStashesInRange(function(temp, obj)
+				if obj:id() == obj_s:id() or obj:id() == self.obj:id() then return end
+				if existing_ids[obj:id()] then return end
 
-			-- Search nearby stashes
-			if GetStashesInRange then
-				IterateStashesInRange(process_repair_item, stash_range)
-			end
+				local sec = obj:section()
+				local part_bonus
 
-			self.CC[2]:Reinit(inv, inf)
+				if (self.parts_match and sec == obj_s:section()) then
+					part_bonus = obj:condition()
+					part_bonus = (game_achievements.has_achievement("mechanized_warfare")) and (part_bonus + 0.02) or part_bonus
+					part_bonus = clamp(math.floor(part_bonus * 100) * self.parts_multi, 0, 100)
+				elseif (self.parts_sections and self.parts_sections[sec]) then
+					part_bonus = ini_sys:r_float_ex(sec, "repair_part_bonus") or self.part_bonus
+					part_bonus = (game_achievements.has_achievement("mechanized_warfare")) and (part_bonus + 0.02) or part_bonus
+					part_bonus = clamp(math.floor(part_bonus * 100) * self.parts_multi, 0, 100)
+				elseif sec == "prt_i_scrap" then
+					-- RPG-XP Zone Gunsmith (Jury Rigging) perk: metallic scraps from stashes
+					local perk_lvl = x_cxv_perks_data and x_cxv_perks_data.perks and x_cxv_perks_data.perks["perk_zone_gunsmith"] or 0
+					if perk_lvl > 0 then
+						part_bonus = 0.04 + (0.01 * perk_lvl)
+						part_bonus = (game_achievements.has_achievement("mechanized_warfare")) and (part_bonus + 0.02) or part_bonus
+						part_bonus = clamp(math.floor(part_bonus * 100), 0, 100)
+					end
+				end
 
-			-- Add bonus % text to each material
-			local clr_b = utils_xml.get_color("pda_blue", true)
-			local fnt = GetFontSmall()
-			for idx, ci in pairs(self.CC[2].cell) do
-				if ci:IsShown() then
-					local con100 = ci.flags.info
-					ci:Add_CustomText(("+" .. con100), nil, nil, clr_b, fnt)
+				if part_bonus then
+					-- Keep the lowest-condition item per section (match existing behaviour)
+					if ItemListSec_2[sec] and ItemListSec_2[sec].condition > obj:condition() then
+						local index = ItemListSec_2[sec].index
+						inv[index] = obj
+						inf[index] = part_bonus
+						ItemListSec_2[sec].condition = obj:condition()
+						added = true
+					elseif not ItemListSec_2[sec] then
+						size_t = size_t + 1
+						inv[size_t] = obj
+						inf[size_t] = part_bonus
+						ItemListSec_2[sec] = { index = size_t, condition = obj:condition() }
+						existing_ids[obj:id()] = true
+						added = true
+					end
+				end
+			end, stash_range)
+
+			if added then
+				-- Reinit with combined list; Reinit clears custom text so we re-add it below.
+				self.CC[2]:Reinit(inv, inf)
+
+				local clr_b = utils_xml.get_color("pda_blue", true)
+				local fnt = GetFontSmall()
+				for idx, ci in pairs(self.CC[2].cell) do
+					if ci:IsShown() then
+						local con100 = (ci.flags and ci.flags.info) or 0
+						ci:Add_CustomText(("+" .. con100), nil, nil, clr_b, fnt)
+					end
 				end
 			end
 		end
