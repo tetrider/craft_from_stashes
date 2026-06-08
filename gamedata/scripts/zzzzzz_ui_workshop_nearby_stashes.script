@@ -635,6 +635,7 @@ function on_game_start()
 								full_ammo = full_ammo + 1
 								similar.findSimilar = false
 
+								if not self.complexCraft then self.complexCraft = {} end
 								self.complexCraft[#self.complexCraft + 1] = {
 									id1 = id,
 									id2 = similar.id,
