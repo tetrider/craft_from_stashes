@@ -202,17 +202,17 @@ function on_game_start()
 		end
 	end
 
-	-- Monkey patch UIWorkshopRepair:ListInventory to find repairable items in range
-	-- This function populates the list of items that can be repaired
+	-- Monkey patch UIWorkshopRepair:ListInventory to find repairable items
+	-- This function populates the list of items that can be repaired.
+	-- Item selection is inventory-only (matching UIWorkshopUpgrade:LoadInventory behavior) -
+	-- nearby stashes/workshop stash are still used for spare parts and toolkits, just not for
+	-- picking the item to repair itself.
 	function ui_workshop.UIWorkshopRepair:ListInventory()
 		self.CC["parts"]:Reset()
 
-		-- Get stash range from MCM
-		stash_range = ui_mcm and ui_mcm.get("craft_from_stashes/range") or default_range
-
 		local inv, size_t = {}, 0
 
-		-- Collect from player inventory
+		-- Collect from player inventory only
 		db.actor:iterate_inventory(function(owner, obj)
 			local sec = obj:section()
 			sec = ini_sys:r_string_ex(sec, "parent_section") or sec -- for weapons with scopes
@@ -221,32 +221,6 @@ function on_game_start()
 				inv[size_t] = obj
 			end
 		end)
-
-		-- Collect from workshop stash if it exists
-		local stashId = self.stashId or (self.owner and self.owner.stashId)
-		if stashId then
-			local stash_obj = get_object_by_id(stashId)
-			if stash_obj then
-				stash_obj:iterate_inventory_box(function(_, obj)
-					local sec = obj:section()
-					sec = ini_sys:r_string_ex(sec, "parent_section") or sec -- for weapons with scopes
-					if itms_manager.ini_parts:r_string_ex("con_parts_list", sec) then
-						size_t = size_t + 1
-						inv[size_t] = obj
-					end
-				end)
-			end
-		end
-
-		-- Collect from nearby stashes (excluding workshop stash to avoid duplicates)
-		IterateStashesInRange(function(temp, obj)
-			local sec = obj:section()
-			sec = ini_sys:r_string_ex(sec, "parent_section") or sec -- for weapons with scopes
-			if itms_manager.ini_parts:r_string_ex("con_parts_list", sec) then
-				size_t = size_t + 1
-				inv[size_t] = obj
-			end
-		end, stash_range, stashId)
 
 		self.CC["inventory"]:Reinit(inv)
 
